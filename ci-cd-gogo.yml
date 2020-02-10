@@ -1,0 +1,129 @@
+Description: CI/CD for EBS Application
+Parameters:
+  GitHubOwner:
+    Type: String
+    Description: Github Username
+  GithubToken:
+    Type: String
+    NoEcho: true
+  Branch:
+    Type: String
+    AllowedValues:
+      - staging
+      - master
+    Description: Branch Name
+  NodeApplication:
+    Type: String
+    Description: EBS Node Application
+  NodeEnvironment:
+    Type: String
+    Description: EBS Node Environment
+  SnsTopicArn:
+    Type: String
+    Description: SNS Topic ARN for Notification
+Resources:
+  EbsCodePipelineRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: EbsCodepipelineRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "codepipeline.amazonaws.com"
+                - "elasticbeanstalk.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+      Policies:
+        - PolicyName: EbsCodepipelinePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "s3:GetObject"
+                  - "s3:GetObjectVersion"
+                  - "s3:ListBucket"
+                  - "s3:PutObject"
+                  - "s3:GetBucketPolicy"
+                Resource:
+                  - arn:aws:s3:::EbsNodeArtifactBucket
+                  - arn:aws:s3:::EbsNodeArtifactBucket/*
+                  - arn:aws:s3:::CodepipelineArtifactBucket
+                  - arn:aws:s3:::CodepipelineArtifactBucket/*
+              - Effect: "Allow"
+                Action: "elasticbeanstalk:*"
+                Resource: !Sub "arn:aws:elasticbeanstalk:${AWS::Region}:${AWS::Region}:*/${NodeApplication}"
+  EbsCodePipeline:
+    Type: "AWS::CodePipeline::Pipeline"
+    DeletionPolicy: Retain
+    Properties:
+      Name: EBS-Node-Codepipeline
+      RoleArn:
+          Fn::GetAtt: [ EbsCodepipelineRole, Arn ]
+      Stages:
+        - Name: SrcCheckout
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Version: 1
+                Provider: GitHub
+              OutputArtifacts:
+                - Name: EbsNodeArtifactBucket
+              Configuration:
+                Owner: !Ref GitHubOwner
+                Repo: node-hello
+                Branch: !Ref Branch
+                OAuthToken: !Ref GithubToken
+                PollForSourceChanges: true
+              RunOrder: 1
+        - Name: Deploy
+          Actions:
+            - Name: DeployAction
+              InputArtifacts:
+                - Name: EbsNodeArtifactBucket
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: 1
+                Provider: ElasticBeanstalk
+              Configuration:
+                ApplicationName: !Ref NodeApplication
+                EnvironmentName: !Ref NodeEnvironment
+              RunOrder: 1
+      ArtifactStore:
+        Type: S3
+        Location: CodepipelineArtifactBucket
+  EventRule:
+    Type: "AWS::Events::Rule"
+    Properties:
+      Description: "EventRule for Codepipeline Failure"
+      EventPattern:
+        source:
+        - aws.codepipeline
+        detail-type:
+        - CodePipeline Pipeline Execution State Change
+        - CodePipeline Stage Execution State Change
+        - CodePipeline Action Execution State Change
+        detail:
+          state:
+          - FAILED
+          pipeline:
+          - Ref: EbsCodePipeline
+      State: "ENABLED"
+      Targets:
+        -
+          Arn:
+            Ref: SnsTopicArn
+          Id: "OpsTopic"
+          InputTransformer:
+            InputTemplate:
+              Fn::Sub: '"The Pipeline <pipeline>  has <state>. For More Details Go to https://console.aws.amazon.com/codepipeline/home?region=${AWS::Region}#/view/"'
+            InputPathsMap:
+              pipeline: "$.detail.pipeline"
+              state: "$.detail.state"
